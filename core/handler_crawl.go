@@ -78,6 +78,12 @@ type CrawlResult[I PeerInfo[I]] struct {
 	// The above error transformed to a known error
 	CrawlErrorStr string
 
+	// Any error that has occurred during eth2 in-protocol ping
+	PingError error
+
+	// The above error transformed to a known error
+	PingErrorStr string
+
 	// When was the crawl started
 	CrawlStartTime time.Time
 
@@ -165,18 +171,34 @@ type CrawlHandler[I PeerInfo[I]] struct {
 	// A map of errors that happened during the crawl.
 	CrawlErrs map[string]int
 
+	// A map of errors that happened during eth2 ping.
+	PingErrs map[string]int
+
 	// The number of peers that were crawled.
 	CrawledPeers int
+
+	// Discv5Reachable counts peers that responded to discv5 UDP requests.
+	Discv5Reachable int
+
+	// TcpDialable counts peers where TCP/QUIC connection succeeded.
+	TcpDialable int
+
+	// PingResponded counts peers that responded to eth2 in-protocol ping.
+	PingResponded int
 }
 
 func NewCrawlHandler[I PeerInfo[I]](cfg *CrawlHandlerConfig) *CrawlHandler[I] {
 	return &CrawlHandler[I]{
-		cfg:          cfg,
-		AgentVersion: make(map[string]int),
-		Protocols:    make(map[string]int),
-		ConnErrs:     make(map[string]int),
-		CrawlErrs:    make(map[string]int),
-		CrawledPeers: 0,
+		cfg:             cfg,
+		AgentVersion:    make(map[string]int),
+		Protocols:       make(map[string]int),
+		ConnErrs:        make(map[string]int),
+		CrawlErrs:       make(map[string]int),
+		PingErrs:        make(map[string]int),
+		CrawledPeers:    0,
+		Discv5Reachable: 0,
+		TcpDialable:     0,
+		PingResponded:   0,
 	}
 }
 
@@ -194,6 +216,18 @@ func (h *CrawlHandler[I]) HandlePeerResult(ctx context.Context, result Result[Cr
 		h.Protocols[p] += 1
 	}
 
+	// Track the three separate reachability metrics (matching paper methodology)
+	if cr.CrawlError == nil {
+		h.Discv5Reachable++
+	}
+	if cr.ConnectError == nil {
+		h.TcpDialable++
+	}
+	if cr.PingError == nil && cr.ConnectError == nil {
+		// Only count ping success if we actually connected (can't ping without connection)
+		h.PingResponded++
+	}
+
 	if cr.ConnectError != nil {
 		// Count connection errors
 		h.ConnErrs[cr.ConnectErrorStr] += 1
@@ -201,6 +235,10 @@ func (h *CrawlHandler[I]) HandlePeerResult(ctx context.Context, result Result[Cr
 
 	if cr.CrawlError != nil {
 		h.CrawlErrs[cr.CrawlErrorStr] += 1
+	}
+
+	if cr.PingError != nil {
+		h.PingErrs[cr.PingErrorStr] += 1
 	}
 
 	// Schedule crawls of all found neighbors unless we got the routing table from the API.
@@ -222,10 +260,14 @@ func (h *CrawlHandler[I]) Summary(state *EngineState) *Summary {
 		PeersDialable:   h.CrawledPeers - h.TotalErrors(),
 		PeersUndialable: h.TotalErrors(),
 		PeersRemaining:  state.PeersQueued,
+		Discv5Reachable: h.Discv5Reachable,
+		TcpDialable:     h.TcpDialable,
+		PingResponded:   h.PingResponded,
 		AgentVersion:    h.AgentVersion,
 		Protocols:       h.Protocols,
 		ConnErrs:        h.ConnErrs,
 		CrawlErrs:       h.CrawlErrs,
+		PingErrs:        h.PingErrs,
 	}
 }
 

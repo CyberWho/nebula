@@ -109,7 +109,7 @@ type Summary struct {
 	// PeersCrawled is the number of peers successfully crawled.
 	PeersCrawled int
 
-	// PeersDialable is the number of peers marked as dialable.
+	// PeersDialable is the number of peers marked as dialable (both TCP and discv5 succeeded).
 	PeersDialable int
 
 	// PeersUndialable is the number of peers marked as undialable.
@@ -117,6 +117,15 @@ type Summary struct {
 
 	// PeersRemaining is the number of peers left to process.
 	PeersRemaining int
+
+	// Discv5Reachable is the number of peers that responded to discv5 UDP requests.
+	Discv5Reachable int
+
+	// TcpDialable is the number of peers where TCP/QUIC connection succeeded.
+	TcpDialable int
+
+	// PingResponded is the number of peers that responded to eth2 in-protocol ping.
+	PingResponded int
 
 	// AgentVersion maps agent versions to their respective counts.
 	AgentVersion map[string]int
@@ -129,6 +138,9 @@ type Summary struct {
 
 	// CrawlErrs maps crawl error types to their occurrence counts.
 	CrawlErrs map[string]int
+
+	// PingErrs maps ping error types to their occurrence counts.
+	PingErrs map[string]int
 }
 
 // RoutingTable captures the routing table information and crawl error of a particular peer

@@ -548,10 +548,13 @@ func updateCrawl(ctx context.Context, dbc db.Client, runErr error, summary *core
 	log.Infoln("Persisting crawl result...")
 
 	args := &db.SealCrawlArgs{
-		Crawled:    summary.PeersCrawled,
-		Dialable:   summary.PeersDialable,
-		Undialable: summary.PeersUndialable,
-		Remaining:  summary.PeersRemaining,
+		Crawled:         summary.PeersCrawled,
+		Dialable:        summary.PeersDialable,
+		Undialable:      summary.PeersUndialable,
+		Remaining:       summary.PeersRemaining,
+		Discv5Reachable: summary.Discv5Reachable,
+		TcpDialable:     summary.TcpDialable,
+		PingResponded:   summary.PingResponded,
 	}
 
 	if runErr == nil {
@@ -582,6 +585,7 @@ func persistCrawlProperties(ctx context.Context, dbc db.Client, summary *core.Su
 		"agent_version": avFull,
 		"protocol":      summary.Protocols,
 		"error":         summary.ConnErrs,
+		"ping_error":    summary.PingErrs,
 	}
 
 	return dbc.InsertCrawlProperties(ctx, pps)
@@ -604,6 +608,11 @@ func logSummary(summary *core.Summary, crawlDuration time.Duration) {
 	}
 
 	log.Infoln("")
+	for err, count := range summary.PingErrs {
+		log.WithField("count", count).WithField("value", err).Infoln("Ping Error")
+	}
+
+	log.Infoln("")
 	for agent, count := range summary.AgentVersion {
 		log.WithField("count", count).WithField("value", agent).Infoln("Agent")
 	}
@@ -619,4 +628,12 @@ func logSummary(summary *core.Summary, crawlDuration time.Duration) {
 		"undialablePeers": summary.PeersUndialable,
 		"remainingPeers":  summary.PeersRemaining,
 	}).Infoln("Finished crawl")
+
+	// Log separate reachability metrics (paper methodology)
+	log.Infoln("")
+	log.WithFields(log.Fields{
+		"discv5Reachable": summary.Discv5Reachable,
+		"tcpDialable":     summary.TcpDialable,
+		"pingResponded":   summary.PingResponded,
+	}).Infoln("Reachability breakdown (paper metrics)")
 }

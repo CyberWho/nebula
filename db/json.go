@@ -18,6 +18,24 @@ import (
 	pgmodels "github.com/dennis-tra/nebula-crawler/db/models/pg"
 )
 
+// JSONCrawl is a custom struct for JSON output that includes all metrics
+// including the new paper-methodology metrics (Discv5Reachable, TcpDialable, PingResponded)
+type JSONCrawl struct {
+	State           string     `json:"state"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	CrawledPeers    *int       `json:"crawled_peers,omitempty"`
+	DialablePeers   *int       `json:"dialable_peers,omitempty"`
+	UndialablePeers *int       `json:"undialable_peers,omitempty"`
+	RemainingPeers  *int       `json:"remaining_peers,omitempty"`
+	Discv5Reachable *int       `json:"discv5_reachable,omitempty"`
+	TcpDialable     *int       `json:"tcp_dialable,omitempty"`
+	PingResponded   *int       `json:"ping_responded,omitempty"`
+	Version         string     `json:"version"`
+}
+
 type JSONClient struct {
 	out string
 
@@ -35,7 +53,7 @@ type JSONClient struct {
 	}
 
 	crawlMu sync.Mutex
-	crawl   *pgmodels.Crawl
+	crawl   *JSONCrawl
 }
 
 func NewJSONClient(out string) (*JSONClient, error) {
@@ -88,7 +106,7 @@ func (c *JSONClient) InitCrawl(ctx context.Context, version string) (err error) 
 
 	now := time.Now()
 
-	c.crawl = &pgmodels.Crawl{
+	c.crawl = &JSONCrawl{
 		State:     pgmodels.CrawlStateStarted,
 		StartedAt: now,
 		Version:   version,
@@ -122,12 +140,15 @@ func (c *JSONClient) SealCrawl(ctx context.Context, args *SealCrawlArgs) (err er
 
 	now := time.Now()
 	c.crawl.UpdatedAt = now
-	c.crawl.CrawledPeers = null.IntFrom(args.Crawled)
-	c.crawl.DialablePeers = null.IntFrom(args.Dialable)
-	c.crawl.UndialablePeers = null.IntFrom(args.Undialable)
-	c.crawl.RemainingPeers = null.IntFrom(args.Remaining)
+	c.crawl.CrawledPeers = &args.Crawled
+	c.crawl.DialablePeers = &args.Dialable
+	c.crawl.UndialablePeers = &args.Undialable
+	c.crawl.RemainingPeers = &args.Remaining
+	c.crawl.Discv5Reachable = &args.Discv5Reachable
+	c.crawl.TcpDialable = &args.TcpDialable
+	c.crawl.PingResponded = &args.PingResponded
 	c.crawl.State = string(args.State)
-	c.crawl.FinishedAt = null.TimeFrom(now)
+	c.crawl.FinishedAt = &now
 
 	data, err := json.MarshalIndent(c.crawl, "", "  ")
 	if err != nil {
@@ -172,6 +193,7 @@ type JSONVisit struct {
 	VisitEndedAt    time.Time
 	ConnectErrorStr string
 	CrawlErrorStr   string
+	PingErrorStr    string
 	Properties      null.JSON
 }
 
@@ -190,6 +212,7 @@ func (c *JSONClient) InsertVisit(ctx context.Context, args *VisitArgs) error {
 		VisitEndedAt:    args.VisitEndedAt,
 		ConnectErrorStr: args.ConnectErrorStr,
 		CrawlErrorStr:   args.CrawlErrorStr,
+		PingErrorStr:    args.PingErrorStr,
 		Properties:      null.JSONFrom(args.Properties),
 	}
 

@@ -2,10 +2,12 @@ package discv5
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/golang/snappy"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -30,6 +33,11 @@ import (
 )
 
 const MaxCrawlRetriesAfterTimeout = 2 // magic
+
+// Eth2 protocol IDs for in-protocol ping
+const (
+	Eth2PingProtocolID = "/eth2/beacon_chain/req/ping/1/ssz_snappy"
+)
 
 type CrawlerConfig struct {
 	Network           config.Network
@@ -171,6 +179,8 @@ func (c *Crawler) Work(ctx context.Context, task PeerInfo) (core.CrawlResult[Pee
 		ConnectErrorStr:     libp2pResult.ConnectErrorStr,
 		CrawlError:          discV5Result.Error,
 		CrawlErrorStr:       discV5Result.ErrorStr,
+		PingError:           libp2pResult.PingError,
+		PingErrorStr:        libp2pResult.PingErrorStr,
 		CrawlEndTime:        time.Now(),
 		ConnectStartTime:    libp2pResult.ConnectStartTime,
 		ConnectEndTime:      libp2pResult.ConnectEndTime,
@@ -305,6 +315,8 @@ type Libp2pResult struct {
 	GenTCPAddr            bool // whether a TCP address was generated
 	WakuClusterID         uint32
 	WakuClusterShards     []uint32
+	PingError             error  // error from eth2 in-protocol ping
+	PingErrorStr          string // the above error transformed to a known error
 }
 
 func (c *Crawler) crawlLibp2p(ctx context.Context, pi PeerInfo) chan Libp2pResult {
@@ -366,6 +378,19 @@ func (c *Crawler) crawlLibp2p(ctx context.Context, pi PeerInfo) chan Libp2pResul
 				result.Protocols = make([]string, len(identify.Protocols))
 				for i := range identify.Protocols {
 					result.Protocols[i] = string(identify.Protocols[i])
+				}
+			}
+
+			// For eth2 networks, send an in-protocol ping to measure protocol-level reachability
+			// This matches the paper's methodology of checking in-protocol PING separately from TCP dial
+			switch c.cfg.Network {
+			case config.NetworkEthCons, config.NetworkHolesky, config.NetworkPortal:
+				pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+				result.PingError = c.sendEth2Ping(pingCtx, pi.ID())
+				pingCancel()
+				if result.PingError != nil {
+					result.PingErrorStr = db.NetError(result.PingError)
+					log.WithError(result.PingError).WithField("remoteID", pi.ID().ShortString()).Debugln("Eth2 ping failed")
 				}
 			}
 
@@ -688,4 +713,110 @@ func (c *Crawler) wakuRequestMetadata(ctx context.Context, pi peer.ID) (uint32, 
 	}
 
 	return response.GetClusterId(), response.GetShards(), nil
+}
+
+// sendEth2Ping sends an eth2 in-protocol ping request to the peer and waits for a pong response.
+// This follows the eth2 beacon chain ReqResp protocol specification.
+// See: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#ping
+func (c *Crawler) sendEth2Ping(ctx context.Context, peerID peer.ID) error {
+	s, err := c.host.NewStream(ctx, peerID, Eth2PingProtocolID)
+	if err != nil {
+		return fmt.Errorf("new stream: %w", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Set read/write deadlines based on context
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = s.SetDeadline(deadline)
+	}
+
+	// Ping request is just a uint64 sequence number (8 bytes in SSZ little-endian encoding)
+	seqNum := uint64(1)
+	sszData := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sszData, seqNum)
+
+	// Snappy encode the SSZ data
+	compressed := snappy.Encode(nil, sszData)
+
+	// Write the request: varint-encoded length prefix + snappy-compressed data
+	// The eth2 ReqResp protocol uses a varint length prefix
+	lengthBuf := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(lengthBuf, uint64(len(compressed)))
+
+	// Write length prefix
+	if _, err := s.Write(lengthBuf[:n]); err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("write length prefix: %w", err)
+	}
+
+	// Write compressed payload
+	if _, err := s.Write(compressed); err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("write ping payload: %w", err)
+	}
+
+	// Close write side to signal we're done sending
+	if err := s.CloseWrite(); err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("close write: %w", err)
+	}
+
+	// Read response: first byte is the response code
+	responseBuf := make([]byte, 1)
+	if _, err := io.ReadFull(s, responseBuf); err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("read response code: %w", err)
+	}
+
+	responseCode := responseBuf[0]
+	if responseCode != 0 {
+		// Non-zero response code indicates an error
+		// 1 = InvalidRequest, 2 = ServerError, 3 = ResourceUnavailable
+		return fmt.Errorf("ping failed with response code: %d", responseCode)
+	}
+
+	// Read the varint-encoded length of the response payload
+	respLength, err := binary.ReadUvarint(&byteReader{s})
+	if err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("read response length: %w", err)
+	}
+
+	// Sanity check on response length (ping response should be small)
+	if respLength > 1024 {
+		_ = s.Reset()
+		return fmt.Errorf("response too large: %d bytes", respLength)
+	}
+
+	// Read the compressed response payload
+	respCompressed := make([]byte, respLength)
+	if _, err := io.ReadFull(s, respCompressed); err != nil {
+		_ = s.Reset()
+		return fmt.Errorf("read response payload: %w", err)
+	}
+
+	// Decompress the response
+	respData, err := snappy.Decode(nil, respCompressed)
+	if err != nil {
+		return fmt.Errorf("snappy decode response: %w", err)
+	}
+
+	// Pong response should be 8 bytes (uint64 sequence number)
+	if len(respData) != 8 {
+		return fmt.Errorf("unexpected pong size: %d bytes", len(respData))
+	}
+
+	// Successfully received pong
+	return nil
+}
+
+// byteReader wraps an io.Reader to implement io.ByteReader for binary.ReadUvarint
+type byteReader struct {
+	r io.Reader
+}
+
+func (br *byteReader) ReadByte() (byte, error) {
+	buf := make([]byte, 1)
+	_, err := io.ReadFull(br.r, buf)
+	return buf[0], err
 }

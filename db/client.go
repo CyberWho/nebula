@@ -31,11 +31,14 @@ func (v VisitType) String() string {
 }
 
 type SealCrawlArgs struct {
-	Crawled    int
-	Dialable   int
-	Undialable int
-	Remaining  int
-	State      CrawlState
+	Crawled         int
+	Dialable        int
+	Undialable      int
+	Remaining       int
+	Discv5Reachable int
+	TcpDialable     int
+	PingResponded   int
+	State           CrawlState
 }
 
 type VisitArgs struct {
@@ -56,6 +59,7 @@ type VisitArgs struct {
 	VisitEndedAt     time.Time
 	ConnectErrorStr  string
 	CrawlErrorStr    string
+	PingErrorStr     string
 	VisitType        VisitType
 	Neighbors        []peer.ID
 	NeighborPrefixes []uint64
